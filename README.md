@@ -33,10 +33,11 @@ internet:
 ## Layout
 
 ```
-cmd/dnszone/         CLI: serve / publish / versions
+cmd/dnszone/         CLI: serve / publish / versions / export
 internal/config/     JSON config (listeners, TTL bounds, ACL, TSIG keys)
 internal/zone/       master-file parsing, validation, immutable snapshots,
-                     lookup (CNAME chase + wildcards), version diffing
+                     lookup (CNAME chase + wildcards), version diffing,
+                     stable master-file rendering
 internal/store/      PostgreSQL: versions, records, change log, LISTEN notify
 internal/server/     DNS handler: queries + AXFR/IXFR, TSIG/ACL gating
 scripts/             postgres bootstrap and dig verification
@@ -85,6 +86,43 @@ testdata/            example zones and a TSIG key file
    dig @127.0.0.1 -p 5354 -k testdata/tsig.key lab.test. IXFR=1 +tcp
    ```
 
+5. Hand a version to a colleague for offline review:
+
+   ```sh
+   ./bin/dnszone export -config config.json -serial 2 -out zone-serial2.db
+   ./bin/dnszone export -config config.json | less   # serial 0 = current
+   ```
+
+   `export` is strictly read-only: it never changes the current-version
+   pointer or any row, so the running service keeps serving unchanged.
+
+## Exporting versions (offline review)
+
+`dnszone export` writes a stored version back out as a standard RFC 1035
+master file:
+
+- **Complete record set.** Every supported record type is emitted
+  (`SOA, NS, A, AAAA, CNAME, MX, TXT, SRV, PTR, CAA`), each RR with its
+  own TTL and the SOA carrying the version serial (refresh/retry/expire/
+  minimum included).
+- **Stable order.** SOA first, apex NS next, then records sorted by name,
+  type and rdata — the same order used for AXFR, so identical versions
+  produce byte-identical files.
+- **Provenance in the file.** Comment lines record the zone origin,
+  source version serial, UTC publication time and stored note. Comments
+  are ignored by the parser.
+- **Round-trip guaranteed.** Before the file is written it is rendered
+  in memory and re-parsed through the same parser used by `publish`; the
+  CLI refuses to write if the result is not an equivalent record set with
+  the same serial. TXT quoting/escaping (quotes, backslashes, tabs,
+  non-ASCII), MX preferences and SRV fields are preserved.
+- **No half files.** The output is written to a temp file and renamed
+  into place only after the full render and round-trip check, so an
+  invalid version (or any other failure) creates nothing and never
+  truncates an existing file. An unknown serial fails with
+  `zone version not found: serial N`.
+
+
 ## Configuration (`config.json`)
 
 | Key | Meaning |
@@ -121,13 +159,18 @@ go test -race ./...
 
 - `internal/zone`: TTL boundaries, same-name multi-records, CNAME
   conflicts, out-of-zone/unsupported-type rejection, CNAME chains,
-  wildcards, negative TTL, diff and AXFR ordering.
+  wildcards, negative TTL, diff and AXFR ordering, and master-file
+  export (stable order, TTL/SOA/TXT/MX/SRV preservation, round-trip).
 - `internal/server`: AA/no-recursion answers, NXDOMAIN/NODATA
   authority, out-of-zone REFUSED, atomic snapshot swap, and TSIG+ACL
   transfer gating over real DNS sockets.
 - `internal/store` (runs against PostgreSQL; creates/uses
   `dnszone_test`): publish/load, rollback of invalid publishes,
-  concurrent publishing with no serial gaps, and change-log contents.
+  concurrent publishing with no serial gaps, change-log contents, and
+  per-version export round-trips.
+- `cmd/dnszone` (runs against PostgreSQL; uses `dnszone_cli_test`):
+  CLI export of current and old versions with reparse equivalence, and
+  the no-half-written-file / clear-error guarantees for bad versions.
 
 An end-to-end `dig` checklist (flags, negatives, AXFR/IXFR content and
 TSIG bookends) lives at `scripts/verify-dig.sh`.

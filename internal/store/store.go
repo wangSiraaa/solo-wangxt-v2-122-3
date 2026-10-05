@@ -147,9 +147,40 @@ func (s *Store) LoadSnapshot(ctx context.Context, serial uint32) (*zone.Snapshot
 		return nil, err
 	}
 	if len(rrs) == 0 {
-		return nil, fmt.Errorf("version %d not found", serial)
+		return nil, fmt.Errorf("%w: serial %d", ErrNoVersion, serial)
 	}
 	return zone.NewSnapshot(s.origin, serial, rrs)
+}
+
+// Version is one published version: its immutable snapshot with the
+// stored metadata (serial, publication time, note).
+type Version struct {
+	PublishedVersion
+	Snapshot *zone.Snapshot
+}
+
+// LoadVersion returns the snapshot and metadata for the given serial.
+// It is read-only and never changes the current-version pointer, so an
+// export of an old version cannot affect the running service.
+func (s *Store) LoadVersion(ctx context.Context, serial uint32) (*Version, error) {
+	var v Version
+	var sid int64
+	err := s.pool.QueryRow(ctx,
+		`SELECT serial, published_at, note FROM zone_versions WHERE serial = $1`,
+		int64(serial)).Scan(&sid, &v.PublishedAt, &v.Note)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, fmt.Errorf("%w: serial %d", ErrNoVersion, serial)
+	}
+	if err != nil {
+		return nil, err
+	}
+	v.Serial = uint32(sid)
+	snap, err := s.LoadSnapshot(ctx, serial)
+	if err != nil {
+		return nil, err
+	}
+	v.Snapshot = snap
+	return &v, nil
 }
 
 // LoadCurrent returns the snapshot currently marked published, or
