@@ -134,6 +134,24 @@ func (s *Store) ListVersions(ctx context.Context, limit int) ([]PublishedVersion
 	return out, rows.Err()
 }
 
+// VersionInfo returns the publish metadata for one version. When serial
+// is not a published version the returned error wraps ErrNoVersion.
+func (s *Store) VersionInfo(ctx context.Context, serial uint32) (*PublishedVersion, error) {
+	var v PublishedVersion
+	var s64 int64
+	err := s.pool.QueryRow(ctx,
+		`SELECT serial, published_at, note FROM zone_versions WHERE serial = $1`,
+		int64(serial)).Scan(&s64, &v.PublishedAt, &v.Note)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, fmt.Errorf("%w: serial %d", ErrNoVersion, serial)
+	}
+	if err != nil {
+		return nil, err
+	}
+	v.Serial = uint32(s64)
+	return &v, nil
+}
+
 // LoadSnapshot reconstructs an immutable snapshot for the given serial.
 func (s *Store) LoadSnapshot(ctx context.Context, serial uint32) (*zone.Snapshot, error) {
 	rows, err := s.pool.Query(ctx,
